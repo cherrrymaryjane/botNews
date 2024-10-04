@@ -2,10 +2,11 @@ import logging
 import feedparser
 from datetime import datetime, timezone
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
-from telegram.ext import Application, CommandHandler, CallbackContext, ConversationHandler, MessageHandler, filters
+from telegram.ext import (
+    Application, CommandHandler, ConversationHandler, MessageHandler, filters, ContextTypes
+)
 import os
 import json
-import asyncio
 
 # Включаем логирование
 logging.basicConfig(
@@ -14,7 +15,7 @@ logging.basicConfig(
 )
 
 # Ваш API токен от BotFather
-TELEGRAM_BOT_TOKEN = '7251203711:AAH7a6m3QxPFJlduIfIQvSWaLD4UfKbrAC'
+TELEGRAM_BOT_TOKEN = '8160585326:AAFmDXtbF9sJ4jCfkBYj0RA14Rj15BnyKvo'
 
 # Глобальный список источников новостей
 NEWS_SOURCES = [
@@ -35,74 +36,35 @@ NEWS_SOURCES = [
 ]
 
 SENT_ARTICLES_FILE = 'sent_articles.json'
-
-BROADCAST_MESSAGE = range(1)
-
-# Словарь для хранения ключевых слов пользователей
-user_keywords = {}
-
-# Словарь для хранения отправленных статей для каждого пользователя
-sent_articles = {}
-
-# Ваш chat_id, чтобы только вы могли отправлять сообщения всем пользователям
-ADMIN_CHAT_ID = '1404964913'
-
-# Файл для сохранения ключевых слов пользователей
 KEYWORDS_FILE = 'user_keywords.json'
+ADMIN_CHAT_ID = '1404964913'
 
 # Состояния для ConversationHandler
 ADD_KEYWORD, CONFIRM_MORE, DELETE_KEYWORD, BROADCAST_MESSAGE = range(4)
 
-# Загружаем уже отправленные статьи из файла
-def load_sent_articles():
-    """Загружаем список отправленных статей из файла."""
-    if os.path.exists(SENT_ARTICLES_FILE):
-        try:
-            with open(SENT_ARTICLES_FILE, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                # Преобразуем списки обратно в множества
-                return {chat_id: set(articles) for chat_id, articles in data.items()}
-        except Exception as e:
-            logging.error(f"Ошибка при загрузке отправленных статей: {e}")
-            return {}
-    return {}
+# Словари для хранения данных
+user_keywords = {}
+sent_articles = {}
 
-# Сохраняем отправленные статьи в файл
-def save_sent_articles(sent_articles):
-    """Сохраняем список отправленных статей в файл."""
+# Загрузка данных из файлов
+def load_json_file(filename, default):
+    if os.path.exists(filename):
+        try:
+            with open(filename, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            logging.error(f"Ошибка при загрузке {filename}: {e}")
+            return default
+    return default
+
+# Сохранение данных в файлы
+def save_json_file(data, filename):
     try:
-        # Преобразуем множества в списки для сохранения в формате JSON
-        data = {chat_id: list(articles) for chat_id, articles in sent_articles.items()}
-        with open(SENT_ARTICLES_FILE, 'w', encoding='utf-8') as f:
+        with open(filename, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=4)
-        logging.info("Отправленные статьи сохранены в файл.")
+        logging.info(f"Данные сохранены в файл {filename}.")
     except Exception as e:
-        logging.error(f"Ошибка при сохранении отправленных статей в файл: {e}")
-
-# Функции для работы с файлом ключевых слов
-def save_keywords_to_file():
-    """Сохраняем ключевые слова пользователей в файл."""
-    try:
-        with open(KEYWORDS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(user_keywords, f, ensure_ascii=False, indent=4)
-        logging.info("Ключевые слова сохранены в файл.")
-    except Exception as e:
-        logging.error(f"Ошибка при сохранении ключевых слов в файл: {e}")
-
-
-def load_keywords_from_file():
-    """Загружаем ключевые слова пользователей из файла."""
-    global user_keywords
-    if os.path.exists(KEYWORDS_FILE):
-        try:
-            with open(KEYWORDS_FILE, 'r', encoding='utf-8') as f:
-                user_keywords = json.load(f)
-            logging.info("Ключевые слова загружены из файла.")
-        except Exception as e:
-            logging.error(f"Ошибка при загрузке ключевых слов из файла: {e}")
-    else:
-        logging.info("Файл с ключевыми словами не найден, создаётся новый список.")
-
+        logging.error(f"Ошибка при сохранении в файл {filename}: {e}")
 
 # Функции для работы с последней проверкой новостей
 def load_last_checked(chat_id):
@@ -113,55 +75,42 @@ def load_last_checked(chat_id):
             with open(last_checked_file, 'r') as file:
                 timestamp = file.read().strip()
                 last_checked = datetime.fromisoformat(timestamp)
-
-                # Приводим дату к UTC, если она offset-naive
                 if last_checked.tzinfo is None:
                     last_checked = last_checked.replace(tzinfo=timezone.utc)
-
                 return last_checked
-        else:
-            # Если файл не найден, возвращаем текущее время с часовым поясом UTC
-            return datetime.now(timezone.utc)
     except Exception as e:
         logging.error(f"Ошибка при загрузке времени последней проверки для {chat_id}: {e}")
-        return datetime.now(timezone.utc)
-
+    return datetime.now(timezone.utc)
 
 def save_last_checked(chat_id, timestamp):
     """Сохраняем время последней проверки для определенного пользователя."""
     last_checked_file = f'{chat_id}_last_checked.txt'
     try:
         with open(last_checked_file, 'w') as file:
-            # Сохраняем время с часовым поясом в формате ISO 8601
             file.write(timestamp.isoformat())
     except Exception as e:
         logging.error(f"Ошибка при сохранении времени последней проверки для {chat_id}: {e}")
 
-
 def parse_pub_date(pub_date_str):
-    """Попробуем несколько форматов для распознавания даты и обработаем часовые пояса."""
+    """Разбор строки даты публикации."""
     date_formats = [
         '%a, %d %b %Y %H:%M:%S %z',  # Стандартный формат RSS
         '%Y-%m-%dT%H:%M:%S%z',        # ISO 8601 формат
         '%a, %d %b %Y %H:%M:%S %Z',   # Вариант без часового пояса
         '%Y-%m-%dT%H:%M:%S.%fZ',      # ISO 8601 с миллисекундами
     ]
-
     for date_format in date_formats:
         try:
             return datetime.strptime(pub_date_str, date_format)
         except ValueError:
             continue
-
     logging.warning(f"Не удалось распознать дату: {pub_date_str}")
     return datetime.now(timezone.utc)
-
 
 def get_latest_articles(url):
     """Получаем последние статьи из RSS-ленты."""
     try:
         feed = feedparser.parse(url)
-
         if not feed.entries:
             logging.warning(f'Нет статей в ленте по URL: {url}')
             return []
@@ -171,12 +120,10 @@ def get_latest_articles(url):
             title = entry.get('title', 'Без заголовка')
             link = entry.get('link')
             pub_date_str = entry.get('published', '')
-
             if not link:
                 continue
 
             pub_date = parse_pub_date(pub_date_str) if pub_date_str else datetime.now(timezone.utc)
-
             if pub_date.tzinfo is None:
                 pub_date = pub_date.replace(tzinfo=timezone.utc)
 
@@ -187,35 +134,33 @@ def get_latest_articles(url):
                 'link': link,
                 'pub_date': pub_date
             })
-
         return articles
-
     except Exception as e:
         logging.error(f"Ошибка при обработке URL {url}: {e}")
         return []
 
-
-async def send_new_articles(context: CallbackContext):
+async def send_new_articles(context: ContextTypes.DEFAULT_TYPE):
     """Проверяем и отправляем новые статьи, фильтруя по ключевым словам."""
     logging.info("Проверка новых статей...")
 
-    sent_articles = load_sent_articles()  # Загружаем отправленные статьи
+    sent_articles = load_json_file(SENT_ARTICLES_FILE, {})
+    # Преобразуем списки обратно в множества
+    sent_articles = {chat_id: set(articles) for chat_id, articles in sent_articles.items()}
 
     for chat_id, keywords in user_keywords.items():
         last_checked = load_last_checked(chat_id)
         new_last_checked = datetime.now(timezone.utc)
 
         if chat_id not in sent_articles:
-            sent_articles[chat_id] = set()  # Создаем запись, если ее нет
+            sent_articles[chat_id] = set()
 
         for url in NEWS_SOURCES:
-            try:
-                articles = get_latest_articles(url)
-                for article in articles:
-                    if article['pub_date'] > last_checked and article['link'] not in sent_articles[chat_id]:
-                        # Проверка ключевых слов
-                        if any(keyword.lower() in article['title'].lower() for keyword in keywords):
-                            message = f"*{article['title']}*\n[Читать далее]({article['link']})"
+            articles = get_latest_articles(url)
+            for article in articles:
+                if article['pub_date'] > last_checked and article['link'] not in sent_articles[chat_id]:
+                    if any(keyword.lower() in article['title'].lower() for keyword in keywords):
+                        message = f"*{article['title']}*\n[Читать далее]({article['link']})"
+                        try:
                             await context.bot.send_message(
                                 chat_id=chat_id,
                                 text=message,
@@ -223,41 +168,37 @@ async def send_new_articles(context: CallbackContext):
                             )
                             logging.info(f"Отправлена статья '{article['title']}' пользователю {chat_id}")
                             sent_articles[chat_id].add(article['link'])
-                        else:
-                            logging.info(f"Статья '{article['title']}' не подходит по ключевым словам для пользователя {chat_id}")
-
-            except Exception as e:
-                logging.error(f"Ошибка при обработке URL {url}: {e}")
+                        except Exception as e:
+                            logging.error(f"Ошибка отправки статьи пользователю {chat_id}: {e}")
+                    else:
+                        logging.info(f"Статья '{article['title']}' не подходит по ключевым словам для пользователя {chat_id}")
 
         save_last_checked(chat_id, new_last_checked)
 
-    save_sent_articles(sent_articles)  # Сохраняем отправленные статьи
-
+    # Преобразуем множества обратно в списки перед сохранением
+    sent_articles_to_save = {chat_id: list(articles) for chat_id, articles in sent_articles.items()}
+    save_json_file(sent_articles_to_save, SENT_ARTICLES_FILE)
 
 # Команды для работы с ключевыми словами
-async def start(update: Update, context: CallbackContext):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Ответ на команду /start."""
     chat_id = str(update.message.chat_id)
-
     if chat_id not in user_keywords:
         user_keywords[chat_id] = []
-
     await update.message.reply_text(
         'Добро пожаловать! Вы можете добавить ключевые слова с помощью команды /add_keyword.'
     )
 
-
 # Диалог для добавления ключевых слов
-async def add_keyword_start(update: Update, context: CallbackContext):
+async def add_keyword_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Начало процесса добавления ключевого слова."""
     await update.message.reply_text(
         "Какое ключевое слово вы хотите добавить?",
-        reply_markup=ReplyKeyboardRemove()  # Убираем клавиатуру, если она была
+        reply_markup=ReplyKeyboardRemove()
     )
     return ADD_KEYWORD
 
-
-async def add_keyword_finish(update: Update, context: CallbackContext):
+async def add_keyword_finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Добавление ключевого слова после ввода."""
     chat_id = str(update.message.chat_id)
     keyword = update.message.text.strip().lower()
@@ -266,20 +207,18 @@ async def add_keyword_finish(update: Update, context: CallbackContext):
         user_keywords[chat_id] = []
 
     user_keywords[chat_id].append(keyword)
-    save_keywords_to_file()  # Сохранить ключевые слова
+    save_json_file(user_keywords, KEYWORDS_FILE)
 
     await update.message.reply_text(f"Ключевое слово '{keyword}' добавлено.")
 
-    # Спрашиваем, хочет ли пользователь добавить ещё одно слово
-    reply_keyboard = [['Да', 'Нет']]  # Определим кнопки для ответа
+    reply_keyboard = [['Да', 'Нет']]
     await update.message.reply_text(
         "Хотите добавить ещё одно ключевое слово?",
         reply_markup=ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True)
     )
     return CONFIRM_MORE
 
-
-async def add_keyword_more(update: Update, context: CallbackContext):
+async def add_keyword_more(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка ответа на вопрос о добавлении ещё одного слова."""
     if update.message.text.lower() == 'да':
         await update.message.reply_text("Введите новое ключевое слово:", reply_markup=ReplyKeyboardRemove())
@@ -288,9 +227,8 @@ async def add_keyword_more(update: Update, context: CallbackContext):
         await update.message.reply_text("Добавление ключевых слов завершено.", reply_markup=ReplyKeyboardRemove())
         return ConversationHandler.END
 
-
 # Диалог для удаления ключевых слов
-async def delete_keyword_start(update: Update, context: CallbackContext):
+async def delete_keyword_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Начало процесса удаления ключевого слова."""
     chat_id = str(update.message.chat_id)
 
@@ -298,14 +236,12 @@ async def delete_keyword_start(update: Update, context: CallbackContext):
         await update.message.reply_text("У вас нет сохраненных ключевых слов для удаления.")
         return ConversationHandler.END
 
-    # Показываем пользователю список его ключевых слов
     keywords_list = user_keywords[chat_id]
     keyword_message = "\n".join([f"{i+1}. {kw}" for i, kw in enumerate(keywords_list)])
     await update.message.reply_text(f"Ваши ключевые слова:\n{keyword_message}\n\nВведите номер ключевого слова для удаления.")
     return DELETE_KEYWORD
 
-
-async def delete_keyword_finish(update: Update, context: CallbackContext):
+async def delete_keyword_finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Удаление ключевого слова после ввода номера."""
     chat_id = str(update.message.chat_id)
     try:
@@ -317,7 +253,7 @@ async def delete_keyword_finish(update: Update, context: CallbackContext):
             return DELETE_KEYWORD
 
         removed_keyword = keywords_list.pop(keyword_index)
-        save_keywords_to_file()  # Сохранить ключевые слова
+        save_json_file(user_keywords, KEYWORDS_FILE)
         await update.message.reply_text(f"Ключевое слово '{removed_keyword}' удалено.", reply_markup=ReplyKeyboardRemove())
     except ValueError:
         await update.message.reply_text("Пожалуйста, введите корректный номер ключевого слова.")
@@ -325,20 +261,17 @@ async def delete_keyword_finish(update: Update, context: CallbackContext):
 
     return ConversationHandler.END
 
-
 # Отмена действия
-async def cancel(update: Update, context: CallbackContext):
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Отмена текущего диалога."""
     await update.message.reply_text('Действие отменено.', reply_markup=ReplyKeyboardRemove())
     return ConversationHandler.END
 
-
-
 # Команда /broadcast
-async def broadcast_start(update: Update, context: CallbackContext):
+async def broadcast_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Начало процесса отправки сообщения всем пользователям (только для администратора)."""
-    chat_id = update.message.chat_id
-    if str(chat_id) != ADMIN_CHAT_ID:
+    chat_id = str(update.message.chat_id)
+    if chat_id != ADMIN_CHAT_ID:
         await update.message.reply_text("Извините, эта команда доступна только администратору.")
         return ConversationHandler.END
 
@@ -348,63 +281,46 @@ async def broadcast_start(update: Update, context: CallbackContext):
     )
     return BROADCAST_MESSAGE
 
-
-async def broadcast_send(update: Update, context: CallbackContext):
+async def broadcast_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Отправка сообщения или изображения всем пользователям."""
-    chat_id = update.message.chat_id
-    
-    # Проверяем, является ли отправитель администратором
-    if str(chat_id) != ADMIN_CHAT_ID:
+    chat_id = str(update.message.chat_id)
+    if chat_id != ADMIN_CHAT_ID:
         await update.message.reply_text("Извините, эта команда доступна только администратору.")
         return ConversationHandler.END
-    
-    # Получаем текст или изображение (если есть)
+
     broadcast_message = update.message.text
     photo = update.message.photo[-1].file_id if update.message.photo else None
 
-    # Логируем действия администратора
-    if broadcast_message:
-        logging.info(f"Администратор отправляет текст: {broadcast_message}")
-    if photo:
-        logging.info(f"Администратор отправляет изображение с file_id: {photo}")
-
-    # Рассылаем сообщение или изображение всем пользователям
     for user_chat_id in user_keywords.keys():
         try:
             if photo and broadcast_message:
-                # Отправляем фото с подписью
                 await context.bot.send_photo(
                     chat_id=user_chat_id,
                     photo=photo,
                     caption=broadcast_message
                 )
-                logging.info(f"Отправлено фото с подписью пользователю {user_chat_id}")
             elif photo:
-                # Отправляем только фото
                 await context.bot.send_photo(
                     chat_id=user_chat_id,
                     photo=photo
                 )
-                logging.info(f"Отправлено фото пользователю {user_chat_id}")
             elif broadcast_message:
-                # Отправляем только текст
                 await context.bot.send_message(
                     chat_id=user_chat_id,
                     text=broadcast_message
                 )
-                logging.info(f"Отправлено текстовое сообщение пользователю {user_chat_id}")
+            logging.info(f"Отправлено сообщение пользователю {user_chat_id}")
         except Exception as e:
             logging.error(f"Ошибка отправки сообщения пользователю {user_chat_id}: {e}")
 
     await update.message.reply_text("Сообщение отправлено всем пользователям.")
     return ConversationHandler.END
 
-
 # Основная функция для запуска бота
-async def main():
+def main():
     """Основная функция для запуска бота."""
-    # Загрузить ключевые слова из файла перед запуском
-    load_keywords_from_file()
+    global user_keywords
+    user_keywords = load_json_file(KEYWORDS_FILE, {})
 
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
@@ -432,8 +348,8 @@ async def main():
         entry_points=[CommandHandler('broadcast', broadcast_start)],
         states={
             BROADCAST_MESSAGE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, broadcast_send),  # Обработка текстов
-                MessageHandler(filters.PHOTO, broadcast_send),  # Обработка изображений
+                MessageHandler(filters.TEXT & ~filters.COMMAND, broadcast_send),
+                MessageHandler(filters.PHOTO, broadcast_send),
             ],
         },
         fallbacks=[CommandHandler('cancel', cancel)],
@@ -450,14 +366,11 @@ async def main():
         send_new_articles,
         interval=60,  # 1 минута
         first=30,
-        data={}
+        name='send_new_articles'
     )
 
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling()
+    # Запуск бота
+    application.run_polling()
 
 if __name__ == '__main__':
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(main())
-    loop.run_forever()
+    main()
