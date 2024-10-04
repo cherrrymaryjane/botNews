@@ -14,7 +14,7 @@ logging.basicConfig(
 )
 
 # Ваш API токен от BotFather
-TELEGRAM_BOT_TOKEN = '7251203711:AAH7a6m3QxPFJlduIfIQvSWaLD4UfKbrAC8'
+TELEGRAM_BOT_TOKEN = '7251203711:AAH7a6m3QxPFJlduIfIQvSWaLD4UfKbrAC'
 
 # Глобальный список источников новостей
 NEWS_SOURCES = [
