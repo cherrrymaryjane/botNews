@@ -1,21 +1,27 @@
 import logging
-import feedparser
-from datetime import datetime, timezone
+import sys
+import asyncio
+from datetime import datetime, timezone, timedelta
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
     Application, CommandHandler, ConversationHandler, MessageHandler, filters, ContextTypes
 )
 import os
 import json
+import aiohttp 
+import aiofiles
+from dateutil import parser as dateparser
+from aiohttp import ClientPayloadError
+from aiohttp.http_exceptions import TransferEncodingError
+import feedparser  # Новый импорт
 
 # Включаем логирование
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
-
-# Ваш API токен от BotFather
-TELEGRAM_BOT_TOKEN = '8160585326:AAFmDXtbF9sJ4jCfkBYj0RA14Rj15BnyKvo'
+ADMIN_CHAT_ID = '1404964913'
+TELEGRAM_BOT_TOKEN = '7251203711:AAH7a6m3QxPFJlduIfIQvSWaLD4UfKbrAC'
 
 # Глобальный список источников новостей
 NEWS_SOURCES = [
@@ -24,20 +30,25 @@ NEWS_SOURCES = [
     'https://feeds.macrumors.com/MacRumors-All',
     'https://www.independent.co.uk/topic/apple/rss',
     'https://9to5mac.com/feed/',
-    'https://www.reddit.com/r/apple/.rss',
-    'https://www.reddit.com/r/iphone/.rss',
-    'https://www.reddit.com/r/ios/.rss',
+    'https://developer.samsung.com/feed',
+    'https://news.samsung.com/global/feed',
     'https://www.reddit.com/r/oneui/.rss',
     'https://www.reddit.com/r/GalaxyWatch/.rss',
     'https://www.sammobile.com/feed/',
     'https://www.gsmarena.com/rss-news-reviews.php3',
-    'https://www.androidpolice.com/feed/',
+    'https://www.reutersagency.com/feed/',
+    'https://www.cnet.com/rss/news/',
+    'https://www.theverge.com/google/rss/index.xml',
+    'https://www.theverge.com/apple/rss/index.xml',
+    'https://www.theverge.com/rss/samsung/index.xml',
+    'https://www.gadgets360.com/rss/news',
+    'https://techcrunch.com/feed/',
+    'https://developer.apple.com/news/rss/news.rss',
     'https://www.zdnet.com/news/rss.xml'
 ]
 
 SENT_ARTICLES_FILE = 'sent_articles.json'
 KEYWORDS_FILE = 'user_keywords.json'
-ADMIN_CHAT_ID = '1404964913'
 
 # Состояния для ConversationHandler
 ADD_KEYWORD, CONFIRM_MORE, DELETE_KEYWORD, BROADCAST_MESSAGE = range(4)
@@ -46,138 +57,170 @@ ADD_KEYWORD, CONFIRM_MORE, DELETE_KEYWORD, BROADCAST_MESSAGE = range(4)
 user_keywords = {}
 sent_articles = {}
 
-# Загрузка данных из файлов
-def load_json_file(filename, default):
+# Асинхронная загрузка JSON файлов
+async def load_json_file_async(filename, default):
     if os.path.exists(filename):
         try:
-            with open(filename, 'r', encoding='utf-8') as f:
-                return json.load(f)
+            async with aiofiles.open(filename, 'r', encoding='utf-8') as f:
+                data = await f.read()
+                return json.loads(data)
         except Exception as e:
-            logging.error(f"Ошибка при загрузке {filename}: {e}")
+            logging.error(f"Ошибка при асинхронной загрузке {filename}: {e}")
             return default
     return default
 
-# Сохранение данных в файлы
-def save_json_file(data, filename):
+# Асинхронное сохранение JSON файлов
+async def save_json_file_async(data, filename):
     try:
-        with open(filename, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=4)
+        async with aiofiles.open(filename, 'w', encoding='utf-8') as f:
+            await f.write(json.dumps(data, ensure_ascii=False, indent=4))
         logging.info(f"Данные сохранены в файл {filename}.")
     except Exception as e:
-        logging.error(f"Ошибка при сохранении в файл {filename}: {e}")
+        logging.error(f"Ошибка при асинхронном сохранении в файл {filename}: {e}")
 
-# Функции для работы с последней проверкой новостей
-def load_last_checked(chat_id):
+# Асинхронная загрузка времени последней проверки
+async def load_last_checked_async(chat_id):
     """Загружаем время последней проверки для определенного пользователя."""
     last_checked_file = f'{chat_id}_last_checked.txt'
     try:
         if os.path.exists(last_checked_file):
-            with open(last_checked_file, 'r') as file:
-                timestamp = file.read().strip()
+            async with aiofiles.open(last_checked_file, 'r', encoding='utf-8') as file:
+                timestamp = await file.read()
+                timestamp = timestamp.strip()
                 last_checked = datetime.fromisoformat(timestamp)
                 if last_checked.tzinfo is None:
                     last_checked = last_checked.replace(tzinfo=timezone.utc)
                 return last_checked
     except Exception as e:
-        logging.error(f"Ошибка при загрузке времени последней проверки для {chat_id}: {e}")
+        logging.error(f"Ошибка при асинхронной загрузке времени последней проверки для {chat_id}: {e}")
     return datetime.now(timezone.utc)
 
-def save_last_checked(chat_id, timestamp):
+# Асинхронное сохранение времени последней проверки
+async def save_last_checked_async(chat_id, timestamp):
     """Сохраняем время последней проверки для определенного пользователя."""
     last_checked_file = f'{chat_id}_last_checked.txt'
     try:
-        with open(last_checked_file, 'w') as file:
-            file.write(timestamp.isoformat())
+        async with aiofiles.open(last_checked_file, 'w', encoding='utf-8') as file:
+            await file.write(timestamp.isoformat())
     except Exception as e:
-        logging.error(f"Ошибка при сохранении времени последней проверки для {chat_id}: {e}")
+        logging.error(f"Ошибка при асинхронном сохранении времени последней проверки для {chat_id}: {e}")
 
 def parse_pub_date(pub_date_str):
-    """Разбор строки даты публикации."""
-    date_formats = [
-        '%a, %d %b %Y %H:%M:%S %z',  # Стандартный формат RSS
-        '%Y-%m-%dT%H:%M:%S%z',        # ISO 8601 формат
-        '%a, %d %b %Y %H:%M:%S %Z',   # Вариант без часового пояса
-        '%Y-%m-%dT%H:%M:%S.%fZ',      # ISO 8601 с миллисекундами
-    ]
-    for date_format in date_formats:
-        try:
-            return datetime.strptime(pub_date_str, date_format)
-        except ValueError:
-            continue
-    logging.warning(f"Не удалось распознать дату: {pub_date_str}")
-    return datetime.now(timezone.utc)
-
-def get_latest_articles(url):
-    """Получаем последние статьи из RSS-ленты."""
+    """Разбор строки даты публикации с использованием dateutil.parser и tzinfos."""
     try:
-        feed = feedparser.parse(url)
-        if not feed.entries:
-            logging.warning(f'Нет статей в ленте по URL: {url}')
-            return []
-
-        articles = []
-        for entry in feed.entries:
-            title = entry.get('title', 'Без заголовка')
-            link = entry.get('link')
-            pub_date_str = entry.get('published', '')
-            if not link:
-                continue
-
-            pub_date = parse_pub_date(pub_date_str) if pub_date_str else datetime.now(timezone.utc)
-            if pub_date.tzinfo is None:
-                pub_date = pub_date.replace(tzinfo=timezone.utc)
-
-            logging.info(f"Получена статья: '{title}' с ссылкой {link} и датой {pub_date}")
-
-            articles.append({
-                'title': title,
-                'link': link,
-                'pub_date': pub_date
-            })
-        return articles
+        # Определяем словарь часовых поясов
+        tzinfos = {
+            'PDT': timezone(timedelta(hours=-7)),  # Pacific Daylight Time
+            'PST': timezone(timedelta(hours=-8)),  # Pacific Standard Time
+            'EDT': timezone(timedelta(hours=-4)),  # Eastern Daylight Time
+            'EST': timezone(timedelta(hours=-5)),  # Eastern Standard Time
+            # Добавьте другие необходимые часовые пояса
+        }
+        pub_date = dateparser.parse(pub_date_str, tzinfos=tzinfos)
+        if pub_date.tzinfo is None:
+            pub_date = pub_date.replace(tzinfo=timezone.utc)
+        return pub_date
     except Exception as e:
-        logging.error(f"Ошибка при обработке URL {url}: {e}")
-        return []
+        logging.warning(f"Не удалось распознать дату: {pub_date_str} ({e})")
+        return datetime.now(timezone.utc)
 
-async def send_new_articles(context: ContextTypes.DEFAULT_TYPE):
-    """Проверяем и отправляем новые статьи, фильтруя по ключевым словам."""
-    logging.info("Проверка новых статей...")
+async def fetch_and_process_feeds(context: ContextTypes.DEFAULT_TYPE):
+    """Асинхронно обрабатывает RSS-ленты и отправляет новые статьи пользователям."""
+    logging.info("Начало проверки новых статей...")
 
-    sent_articles = load_json_file(SENT_ARTICLES_FILE, {})
-    # Преобразуем списки обратно в множества
+    # Инициализируем семафор для ограничения количества одновременных запросов
+    semaphore = asyncio.Semaphore(3)
+
+    # Загружаем отправленные статьи и ключевые слова пользователей
+    sent_articles = await load_json_file_async(SENT_ARTICLES_FILE, {})
     sent_articles = {chat_id: set(articles) for chat_id, articles in sent_articles.items()}
 
-    for chat_id, keywords in user_keywords.items():
-        last_checked = load_last_checked(chat_id)
-        new_last_checked = datetime.now(timezone.utc)
+    global user_keywords
+    if not user_keywords:
+        user_keywords = await load_json_file_async(KEYWORDS_FILE, {})
 
-        if chat_id not in sent_articles:
-            sent_articles[chat_id] = set()
-
+    # Создаем сессию aiohttp с ограничением на количество соединений
+    connector = aiohttp.TCPConnector(limit=10)
+    async with aiohttp.ClientSession(connector=connector) as session:
+        tasks = []
         for url in NEWS_SOURCES:
-            articles = get_latest_articles(url)
-            for article in articles:
-                if article['pub_date'] > last_checked and article['link'] not in sent_articles[chat_id]:
-                    if any(keyword.lower() in article['title'].lower() for keyword in keywords):
-                        message = f"*{article['title']}*\n[Читать далее]({article['link']})"
-                        try:
-                            await context.bot.send_message(
-                                chat_id=chat_id,
-                                text=message,
-                                parse_mode='Markdown'
-                            )
-                            logging.info(f"Отправлена статья '{article['title']}' пользователю {chat_id}")
-                            sent_articles[chat_id].add(article['link'])
-                        except Exception as e:
-                            logging.error(f"Ошибка отправки статьи пользователю {chat_id}: {e}")
-                    else:
-                        logging.info(f"Статья '{article['title']}' не подходит по ключевым словам для пользователя {chat_id}")
+            tasks.append(process_feed(url, session, semaphore, context, sent_articles))
+        await asyncio.gather(*tasks)
 
-        save_last_checked(chat_id, new_last_checked)
-
+    # Сохраняем обновленные отправленные статьи
     # Преобразуем множества обратно в списки перед сохранением
     sent_articles_to_save = {chat_id: list(articles) for chat_id, articles in sent_articles.items()}
-    save_json_file(sent_articles_to_save, SENT_ARTICLES_FILE)
+    await save_json_file_async(sent_articles_to_save, SENT_ARTICLES_FILE)
+
+async def process_feed(url, session, semaphore, context, sent_articles):
+    """Асинхронно загружает и обрабатывает одну RSS-ленту."""
+    async with semaphore:
+        try:
+            headers = {
+                'User-Agent': 'Mozilla/5.0',
+                'Accept-Encoding': 'gzip, deflate',
+                'Connection': 'close'
+            }
+            timeout = aiohttp.ClientTimeout(total=30)
+            async with session.get(url, headers=headers, timeout=timeout, allow_redirects=True) as response:
+                if response.status == 200:
+                    response_content = await response.read()
+                    feed = feedparser.parse(response_content)
+                    if 'entries' not in feed:
+                        logging.warning(f"Нет записей в RSS-ленте {url}.")
+                        return
+                    else:
+                        for entry in feed.entries:
+                            await process_entry(entry, context, sent_articles)
+                elif response.status == 429:
+                    logging.warning(f"Получен статус 429 для {url}. Пропускаем этот источник в текущей итерации.")
+                else:
+                    logging.error(f"Ошибка при получении RSS-ленты по URL {url}: Статус {response.status}")
+        except TransferEncodingError as e:
+            logging.error(f"Ошибка передачи данных при обработке RSS-ленты по URL {url}: {e}")
+        except ClientPayloadError as e:
+            logging.error(f"Ошибка при обработке RSS-ленты по URL {url}: {e}")
+        except Exception as e:
+            logging.error(f"Ошибка при обработке RSS-ленты по URL {url}: {e}")
+
+async def process_entry(entry, context, sent_articles):
+    """Обрабатывает одну статью из RSS-ленты."""
+    title = entry.title if 'title' in entry else 'Без заголовка'
+    link = entry.link if 'link' in entry else ''
+    pub_date_str = entry.published if 'published' in entry else ''
+
+    if not link:
+        return
+
+    pub_date = parse_pub_date(pub_date_str) if pub_date_str else datetime.now(timezone.utc)
+    if pub_date.tzinfo is None:
+        pub_date = pub_date.replace(tzinfo=timezone.utc)
+
+    # Создаем структуру статьи
+    article = {
+        'title': title,
+        'link': link,
+        'pub_date': pub_date
+    }
+
+    # Проходим по всем пользователям и сразу отправляем статью, если она подходит
+    for chat_id, keywords in user_keywords.items():
+        last_checked = await load_last_checked_async(chat_id)
+        if article['pub_date'] > last_checked and article['link'] not in sent_articles.get(chat_id, set()):
+            if any(keyword.lower() in article['title'].lower() for keyword in keywords):
+                message = f"*{article['title']}*\n[Читать далее]({article['link']})"
+                try:
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=message,
+                        parse_mode='Markdown',
+                        disable_web_page_preview=False
+                    )
+                    logging.info(f"Отправлена статья '{article['title']}' пользователю {chat_id}")
+                    sent_articles.setdefault(chat_id, set()).add(article['link'])
+                    await save_last_checked_async(chat_id, article['pub_date'])
+                except Exception as e:
+                    logging.error(f"Ошибка отправки статьи пользователю {chat_id}: {e}")
 
 # Команды для работы с ключевыми словами
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -207,7 +250,7 @@ async def add_keyword_finish(update: Update, context: ContextTypes.DEFAULT_TYPE)
         user_keywords[chat_id] = []
 
     user_keywords[chat_id].append(keyword)
-    save_json_file(user_keywords, KEYWORDS_FILE)
+    await save_json_file_async(user_keywords, KEYWORDS_FILE)
 
     await update.message.reply_text(f"Ключевое слово '{keyword}' добавлено.")
 
@@ -253,7 +296,7 @@ async def delete_keyword_finish(update: Update, context: ContextTypes.DEFAULT_TY
             return DELETE_KEYWORD
 
         removed_keyword = keywords_list.pop(keyword_index)
-        save_json_file(user_keywords, KEYWORDS_FILE)
+        await save_json_file_async(user_keywords, KEYWORDS_FILE)
         await update.message.reply_text(f"Ключевое слово '{removed_keyword}' удалено.", reply_markup=ReplyKeyboardRemove())
     except ValueError:
         await update.message.reply_text("Пожалуйста, введите корректный номер ключевого слова.")
@@ -291,36 +334,47 @@ async def broadcast_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
     broadcast_message = update.message.text
     photo = update.message.photo[-1].file_id if update.message.photo else None
 
+    send_tasks = []
     for user_chat_id in user_keywords.keys():
-        try:
-            if photo and broadcast_message:
-                await context.bot.send_photo(
-                    chat_id=user_chat_id,
-                    photo=photo,
-                    caption=broadcast_message
-                )
-            elif photo:
-                await context.bot.send_photo(
-                    chat_id=user_chat_id,
-                    photo=photo
-                )
-            elif broadcast_message:
-                await context.bot.send_message(
-                    chat_id=user_chat_id,
-                    text=broadcast_message
-                )
-            logging.info(f"Отправлено сообщение пользователю {user_chat_id}")
-        except Exception as e:
-            logging.error(f"Ошибка отправки сообщения пользователю {user_chat_id}: {e}")
+        send_tasks.append(send_broadcast_message(context.bot, user_chat_id, broadcast_message, photo))
+
+    await asyncio.gather(*send_tasks)
 
     await update.message.reply_text("Сообщение отправлено всем пользователям.")
     return ConversationHandler.END
 
+async def send_broadcast_message(bot, chat_id, message, photo):
+    """Отправляет сообщение или изображение одному пользователю."""
+    try:
+        if photo and message:
+            await bot.send_photo(
+                chat_id=chat_id,
+                photo=photo,
+                caption=message
+            )
+        elif photo:
+            await bot.send_photo(
+                chat_id=chat_id,
+                photo=photo
+            )
+        elif message:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=message
+            )
+        logging.info(f"Отправлено сообщение пользователю {chat_id}")
+    except Exception as e:
+        logging.error(f"Ошибка отправки сообщения пользователю {chat_id}: {e}")
+
 # Основная функция для запуска бота
 def main():
-    """Основная функция для запуска бота."""
     global user_keywords
-    user_keywords = load_json_file(KEYWORDS_FILE, {})
+
+    # Создаем новый цикл событий
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    user_keywords = loop.run_until_complete(load_json_file_async(KEYWORDS_FILE, {}))
 
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
@@ -361,12 +415,11 @@ def main():
     application.add_handler(broadcast_conv_handler)
 
     # Добавляем задачу для регулярной проверки новостей
-    job_queue = application.job_queue
-    job_queue.run_repeating(
-        send_new_articles,
+    application.job_queue.run_repeating(
+        fetch_and_process_feeds,
         interval=60,  # 1 минута
         first=30,
-        name='send_new_articles'
+        name='fetch_and_process_feeds'
     )
 
     # Запуск бота
